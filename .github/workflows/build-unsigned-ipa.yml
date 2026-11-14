@@ -1,0 +1,154 @@
+name: Build unsigned IPA
+on:
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: '产物保留天数，1-90（默认 30）'
+        required: false
+        default: '30'
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE'
+permissions:
+  contents: read
+concurrency:
+  group: unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: Archive unsigned IPA
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      PROJECT_DIR: RP-IOS/RP-IOS
+      ARCHIVE: ${{ runner.temp }}/RP-Hub.xcarchive
+      DERIVED: ${{ runner.temp }}/DerivedData
+      SPM: ${{ runner.temp }}/SourcePackages
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 定位工程与预检
+        run: |
+          set -eu
+          cd "$PROJECT_DIR"
+          echo "=== 工具链 ==="
+          xcodebuild -version
+          node --version
+          npm --version
+          
+          # 兼容 iOS/ios
+          if [ -d "ios" ]; then IOS_DIR="ios"; else IOS_DIR="iOS"; fi
+          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
+          echo "工程目录: $PROJECT_DIR/$IOS_DIR"
+          
+          test -f package-lock.json || { echo "::error::缺少 package-lock.json"; exit 1; }
+          test -f "$IOS_DIR/App/App.xcodeproj/xcshareddata/xcschemes/App.xcscheme" || {
+            echo "::error::缺少 shared scheme"; exit 1; }
+          
+          APPID=$(node -p "require('./capacitor.config.json').appId")
+          PBX=$(grep -oE 'PRODUCT_BUNDLE_IDENTIFIER = [^;]+' "$IOS_DIR/App/App.xcodeproj/project.pbxproj" \
+            | sed -E 's/.*= //' | tr -d '"' | sort -u | tr '\n' ' ' | sed 's/ *$//')
+          echo "capacitor: $APPID | pbxproj: $PBX"
+          [ "$PBX" = "$APPID" ] || { echo "::error::bundle id 不一致"; exit 1; }
+          
+          echo "APP_ID=$APPID" >> $GITHUB_ENV
+          echo "APP_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
+          
+          RET="${{ inputs.retention_days || 30 }}"
+          case "$RET" in ''|*[!0-9]*) RET=30 ;; esac
+          if [ "$RET" -lt 1 ] || [ "$RET" -gt 90 ]; then RET=30; fi
+          echo "RETENTION=$RET" >> $GITHUB_ENV
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ env.PROJECT_DIR }}/package-lock.json
+
+      - name: 安装依赖
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm ci
+
+      - name: Vite 构建
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run build
+
+      - name: 同步 Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f "$IOS_DIR/App/Podfile" ]; then (cd "$IOS_DIR/App" && pod install --repo-update); fi
+          npx cap sync ios
+          test -f "$IOS_DIR/App/App/public/index.html"
+
+      - name: 解析 SPM
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "$IOS_DIR/App/App.xcodeproj" \
+            -scheme App \
+            -derivedDataPath "$DERIVED" \
+            -clonedSourcePackagesDirPath "$SPM"
+
+      - name: Archive（未签名）
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          xcodebuild \
+            -project "$IOS_DIR/App/App.xcodeproj" \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE" \
+            -derivedDataPath "$DERIVED" \
+            -clonedSourcePackagesDirPath "$SPM" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            archive
+
+      - name: 打包未签名 IPA
+        run: |
+          APP=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name '*.app' -type d -print -quit)
+          [ -n "$APP" ] || { echo "::error::archive 里没有 .app"; exit 1; }
+          
+          STAGE="${{ runner.temp }}/ipa-stage"
+          rm -rf "$STAGE" && mkdir -p "$STAGE/Payload"
+          cp -R "$APP" "$STAGE/Payload/"
+          
+          IPA_NAME="RP-Hub-unsigned-${{ github.run_number }}.ipa"
+          IPA="$GITHUB_WORKSPACE/$IPA_NAME"
+          rm -f "$IPA"
+          (cd "$STAGE" && zip -qry "$IPA" Payload -x '*.DS_Store')
+          
+          echo "IPA_NAME=$IPA_NAME" >> $GITHUB_ENV
+          echo "IPA_SIZE=$(du -h "$IPA" | awk '{print $1}')" >> $GITHUB_ENV
+          echo "IPA_SHA256=$(shasum -a 256 "$IPA" | awk '{print $1}')" >> $GITHUB_ENV
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: RP-Hub-unsigned-IPA-${{ github.run_number }}
+          path: ${{ env.IPA_NAME }}
+          if-no-files-found: error
+          retention-days: ${{ env.RETENTION }}
+
+      - name: 构建摘要
+        run: |
+          {
+            echo "### 未签名 IPA 已生成 ✅"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 构建路径 | \`${{ env.PROJECT_DIR }}\` |"
+            echo "| 版本 | \`${{ env.APP_VERSION }}\` |"
+            echo "| Bundle ID | \`${{ env.APP_ID }}\` |"
+            echo "| 大小 | ${{ env.IPA_SIZE }} |"
+            echo "| SHA256 | \`${{ env.IPA_SHA256 }}\` |"
+            echo ""
+            echo "下载后用 Sideloadly / AltStore 自签安装（免费账号 7 天续签）。"
+          } >> "$GITHUB_STEP_SUMMARY"
