@@ -1,0 +1,74 @@
+name: Auto Unzip to RP-IOS
+
+on:
+  push:
+    paths:
+      - '**.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 解压并固定移动到 RP-IOS（递归剥层）
+        run: |
+          shopt -s globstar nullglob
+
+          TARGET_DIR="RP-IOS"
+          mkdir -p "$TARGET_DIR"
+
+          for zipfile in **/*.zip; do
+            echo "处理: $zipfile"
+
+            tmp=$(mktemp -d)
+            unzip -o "$zipfile" -d "$tmp"
+
+            # 找到解压后的真实内容（递归剥掉所有中间目录）
+            current="$tmp"
+            while true; do
+              entries=("$current"/* "$current"/.*)
+              # 过滤掉 . 和 ..
+              real=()
+              for e in "${entries[@]}"; do
+                base=$(basename "$e")
+                if [ "$base" != "." ] && [ "$base" != ".." ]; then
+                  real+=("$e")
+                fi
+              done
+
+              # 如果只有 1 个且是目录，继续剥
+              if [ "${#real[@]}" -eq 1 ] && [ -d "${real[0]}" ]; then
+                current="${real[0]}"
+              else
+                break
+              fi
+            done
+
+            # 把剥到最后的内容移动到目标目录
+            for item in "$current"/* "$current"/.*; do
+              base=$(basename "$item")
+              if [ "$base" != "." ] && [ "$base" != ".." ]; then
+                mv "$item" "$TARGET_DIR/" 2>/dev/null || true
+              fi
+            done
+
+            rm -rf "$tmp"
+            rm -f "$zipfile"
+          done
+
+          # 清理残留空目录（包括旧的 RP-Hub-iOS 空壳）
+          find . -type d -empty -not -path "./.git/*" -not -path "./.github/*" -delete
+
+      - name: 提交更改
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git diff --cached --quiet && echo "没有新内容" || git commit -m "auto: 解压并移动到 RP-IOS"
+          git push
