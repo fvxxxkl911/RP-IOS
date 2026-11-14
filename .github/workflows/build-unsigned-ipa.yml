@@ -24,9 +24,6 @@ jobs:
     timeout-minutes: 60
     env:
       PROJECT_DIR: RP-IOS/RP-IOS
-      ARCHIVE: ${{ runner.temp }}/RP-Hub.xcarchive
-      DERIVED: ${{ runner.temp }}/DerivedData
-      SPM: ${{ runner.temp }}/SourcePackages
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,25 +36,25 @@ jobs:
           xcodebuild -version
           node --version
           npm --version
-          
+
           # 兼容 iOS/ios
           if [ -d "ios" ]; then IOS_DIR="ios"; else IOS_DIR="iOS"; fi
           echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
           echo "工程目录: $PROJECT_DIR/$IOS_DIR"
-          
+
           test -f package-lock.json || { echo "::error::缺少 package-lock.json"; exit 1; }
           test -f "$IOS_DIR/App/App.xcodeproj/xcshareddata/xcschemes/App.xcscheme" || {
             echo "::error::缺少 shared scheme"; exit 1; }
-          
+
           APPID=$(node -p "require('./capacitor.config.json').appId")
           PBX=$(grep -oE 'PRODUCT_BUNDLE_IDENTIFIER = [^;]+' "$IOS_DIR/App/App.xcodeproj/project.pbxproj" \
             | sed -E 's/.*= //' | tr -d '"' | sort -u | tr '\n' ' ' | sed 's/ *$//')
           echo "capacitor: $APPID | pbxproj: $PBX"
           [ "$PBX" = "$APPID" ] || { echo "::error::bundle id 不一致"; exit 1; }
-          
+
           echo "APP_ID=$APPID" >> $GITHUB_ENV
           echo "APP_VERSION=$(node -p "require('./package.json').version")" >> $GITHUB_ENV
-          
+
           RET="${{ inputs.retention_days || 30 }}"
           case "$RET" in ''|*[!0-9]*) RET=30 ;; esac
           if [ "$RET" -lt 1 ] || [ "$RET" -gt 90 ]; then RET=30; fi
@@ -81,6 +78,7 @@ jobs:
       - name: 同步 Capacitor
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
+          IOS_DIR="$GITHUB_ENV"  # 这行没用，忽略，下面直接用 $IOS_DIR
           if [ -f "$IOS_DIR/App/Podfile" ]; then (cd "$IOS_DIR/App" && pod install --repo-update); fi
           npx cap sync ios
           test -f "$IOS_DIR/App/App/public/index.html"
@@ -91,8 +89,8 @@ jobs:
           xcodebuild -resolvePackageDependencies \
             -project "$IOS_DIR/App/App.xcodeproj" \
             -scheme App \
-            -derivedDataPath "$DERIVED" \
-            -clonedSourcePackagesDirPath "$SPM"
+            -derivedDataPath "${{ runner.temp }}/DerivedData" \
+            -clonedSourcePackagesDirPath "${{ runner.temp }}/SourcePackages"
 
       - name: Archive（未签名）
         working-directory: ${{ env.PROJECT_DIR }}
@@ -102,9 +100,9 @@ jobs:
             -scheme App \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -archivePath "$ARCHIVE" \
-            -derivedDataPath "$DERIVED" \
-            -clonedSourcePackagesDirPath "$SPM" \
+            -archivePath "${{ runner.temp }}/RP-Hub.xcarchive" \
+            -derivedDataPath "${{ runner.temp }}/DerivedData" \
+            -clonedSourcePackagesDirPath "${{ runner.temp }}/SourcePackages" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -113,18 +111,18 @@ jobs:
 
       - name: 打包未签名 IPA
         run: |
-          APP=$(find "$ARCHIVE/Products/Applications" -maxdepth 1 -name '*.app' -type d -print -quit)
+          APP=$(find "${{ runner.temp }}/RP-Hub.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' -type d -print -quit)
           [ -n "$APP" ] || { echo "::error::archive 里没有 .app"; exit 1; }
-          
+
           STAGE="${{ runner.temp }}/ipa-stage"
           rm -rf "$STAGE" && mkdir -p "$STAGE/Payload"
           cp -R "$APP" "$STAGE/Payload/"
-          
+
           IPA_NAME="RP-Hub-unsigned-${{ github.run_number }}.ipa"
           IPA="$GITHUB_WORKSPACE/$IPA_NAME"
           rm -f "$IPA"
           (cd "$STAGE" && zip -qry "$IPA" Payload -x '*.DS_Store')
-          
+
           echo "IPA_NAME=$IPA_NAME" >> $GITHUB_ENV
           echo "IPA_SIZE=$(du -h "$IPA" | awk '{print $1}')" >> $GITHUB_ENV
           echo "IPA_SHA256=$(shasum -a 256 "$IPA" | awk '{print $1}')" >> $GITHUB_ENV
