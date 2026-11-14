@@ -1,0 +1,31 @@
+{
+  "name": "rp-hub-ios",
+  "version": "0.2.2",
+  "private": true,
+  "type": "module",
+  "description": "RP Hub Dev 0.2.2 - Capacitor iOS shell (unsigned IPA via GitHub Actions)",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build && node scripts/check-dist.cjs",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "node --test tests/provider-routing.test.cjs",
+    "cap:add:ios": "npm run build && cap add ios",
+    "cap:sync": "npm run build && cap sync ios",
+    "cap:open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/app": "8.1.2",
+    "@capacitor/core": "8.6.2",
+    "@capacitor/ios": "8.6.2",
+    "@capacitor/keyboard": "8.0.6",
+    "@capacitor/splash-screen": "8.0.2",
+    "@capacitor/status-bar": "8.0.4"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.6.2",
+    "vite": "8.3.8"
+  }
+}
