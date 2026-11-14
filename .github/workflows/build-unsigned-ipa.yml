@@ -22,25 +22,44 @@ jobs:
     name: Archive unsigned IPA
     runs-on: macos-latest
     timeout-minutes: 60
-    env:
-      PROJECT_DIR: RP-IOS/RP-IOS
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 定位工程与预检
+      - name: 自动定位项目根目录
         run: |
           set -eu
-          cd "$PROJECT_DIR"
-          echo "=== 工具链 ==="
+          echo "=== 仓库根目录结构 ==="
+          ls -la
+          echo "=== 查找 package.json（排除 node_modules）==="
+          find . -maxdepth 5 -name package.json -not -path "*/node_modules/*" -print
+
+          # 优先找带 capacitor 配置的目录
+          PROJECT_DIR=$(find . -maxdepth 5 -name "capacitor.config.json" -not -path "*/node_modules/*" -print -quit | xargs -I{} dirname {})
+          if [ -z "$PROJECT_DIR" ]; then
+            PROJECT_DIR=$(find . -maxdepth 5 -name "package.json" -not -path "*/node_modules/*" -print -quit | xargs -I{} dirname {})
+          fi
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::找不到项目根目录（无 capacitor.config.json / package.json）"
+            exit 1
+          fi
+          # 去掉开头的 ./
+          PROJECT_DIR="${PROJECT_DIR#./}"
+          echo "定位到项目目录: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+
+          # 找 iOS 目录（兼容大小写）
+          if [ -d "$PROJECT_DIR/ios" ]; then IOS_DIR="ios"; else IOS_DIR="iOS"; fi
+          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
+          echo "iOS 目录: $PROJECT_DIR/$IOS_DIR"
+
+      - name: 环境与配置预检
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -eu
           xcodebuild -version
           node --version
           npm --version
-
-          # 兼容 iOS/ios
-          if [ -d "ios" ]; then IOS_DIR="ios"; else IOS_DIR="iOS"; fi
-          echo "IOS_DIR=$IOS_DIR" >> $GITHUB_ENV
-          echo "工程目录: $PROJECT_DIR/$IOS_DIR"
 
           test -f package-lock.json || { echo "::error::缺少 package-lock.json"; exit 1; }
           test -f "$IOS_DIR/App/App.xcodeproj/xcshareddata/xcschemes/App.xcscheme" || {
@@ -78,7 +97,6 @@ jobs:
       - name: 同步 Capacitor
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          IOS_DIR="$GITHUB_ENV"  # 这行没用，忽略，下面直接用 $IOS_DIR
           if [ -f "$IOS_DIR/App/Podfile" ]; then (cd "$IOS_DIR/App" && pod install --repo-update); fi
           npx cap sync ios
           test -f "$IOS_DIR/App/App/public/index.html"
