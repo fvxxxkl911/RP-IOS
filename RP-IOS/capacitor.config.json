@@ -1,0 +1,32 @@
+{
+  "appId": "cn.rphub.dev",
+  "appName": "RP Hub",
+  "webDir": "dist",
+  "server": {
+    "iosScheme": "capacitor",
+    "cleartext": true
+  },
+  "ios": {
+    "backgroundColor": "#f9fafb"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": false
+    },
+    "Keyboard": {
+      "resize": "native",
+      "autoBackdropColor": "auto",
+      "style": "LIGHT"
+    },
+    "StatusBar": {
+      "overlaysWebView": false,
+      "style": "DEFAULT",
+      "backgroundColor": "#f9fafb"
+    },
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "backgroundColor": "#f9fafb",
+      "showSpinner": false
+    }
+  }
+}

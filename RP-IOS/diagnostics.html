@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>RP Hub · 真机连通性自检</title>
+    <style>
+        :root { color-scheme: light dark; }
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: 16px; padding-top: calc(16px + env(safe-area-inset-top, 0px));
+               padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+               font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+               background: #f6f7f9; color: #1f2430; }
+        h1 { font-size: 19px; margin: 0 0 4px; }
+        .sub { color: #6b7280; font-size: 13px; margin-bottom: 16px; }
+        .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+        label { display: block; font-size: 12px; color: #6b7280; margin: 8px 0 4px; }
+        input { width: 100%; padding: 10px 12px; font-size: 16px; border: 1px solid #d1d5db;
+                border-radius: 8px; background: #fff; color: inherit; }
+        .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+        button { flex: 1 1 auto; min-width: 110px; padding: 11px 12px; font-size: 14px; font-weight: 600;
+                 border: 1px solid #d1d5db; border-radius: 8px; background: #fff; color: inherit; cursor: pointer; }
+        button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+        button:disabled { opacity: .5; }
+        .item { border-top: 1px solid #eef0f3; padding: 10px 0; }
+        .item:first-child { border-top: 0; }
+        .name { font-weight: 600; font-size: 14px; }
+        .status { font-size: 12px; margin-left: 6px; padding: 1px 7px; border-radius: 99px; }
+        .s-ok { background: #dcfce7; color: #166534; }
+        .s-warn { background: #fef3c7; color: #92400e; }
+        .s-err { background: #fee2e2; color: #991b1b; }
+        .s-run { background: #e0e7ff; color: #3730a3; }
+        .detail { font: 12px/1.5 ui-monospace, monospace; color: #6b7280; word-break: break-all; white-space: pre-wrap; margin-top: 4px; }
+        .env { font: 12px/1.6 ui-monospace, monospace; word-break: break-all; }
+        code { background: #f3f4f6; padding: 1px 4px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <a href="/index.html" style="display:inline-block;margin-bottom:10px;font-size:13px;color:#2563eb;text-decoration:none">← 返回主界面</a>
+    <h1>真机连通性自检</h1>
+    <div class="sub">只在本页临时使用密钥，不写入任何存储。用于确认 iOS 容器里 API 能否直连、流式是否保留。</div>
+
+    <div class="card">
+        <div class="env" id="env">正在读取环境…</div>
+    </div>
+
+    <div class="card">
+        <label>API Base URL（到 /v1 为止）</label>
+        <input id="base" type="url" inputmode="url" placeholder="https://api.siliconflow.cn/v1">
+        <div class="row">
+            <button data-url="https://api.siliconflow.cn/v1">硅基流动</button>
+            <button data-url="https://ai.juguang.chat/v1">聚光</button>
+        </div>
+        <label>API Key</label>
+        <input id="key" type="password" autocomplete="off" placeholder="sk-...">
+        <label>模型 ID</label>
+        <input id="model" type="text" placeholder="留空则自动取 /models 第一个">
+        <div class="row">
+            <button class="primary" id="run">运行全部测试</button>
+        </div>
+    </div>
+
+    <div class="card" id="results"><div class="sub" style="margin:0">尚未运行。</div></div>
+
+<script>
+(function () {
+    'use strict';
+    var $ = function (id) { return document.getElementById(id); };
+    var N = window.RPHubNative || {};
+
+    $('env').innerHTML = [
+        'platform   : ' + (N.platform || (window.Capacitor ? 'capacitor' : 'web')),
+        'native     : ' + (N.native ? 'true (真机/模拟器)' : 'false (普通浏览器)'),
+        'scheme     : ' + (N.scheme || location.protocol.replace(/:$/, '')),
+        'origin     : ' + (N.origin || location.origin),
+        'fetch 已接管: ' + (N.fetchPatched ? 'true ← CapacitorHttp 已开启，流式可能退化' : 'false ← WebView 原生 fetch'),
+        'plugins    : ' + ((N.plugins || []).join(', ') || '(无)'),
+        'userAgent  : ' + navigator.userAgent
+    ].join('\n');
+
+    document.querySelectorAll('button[data-url]').forEach(function (b) {
+        b.addEventListener('click', function () { $('base').value = b.getAttribute('data-url'); });
+    });
+
+    var results = $('results');
+    var render = function (name, state, detail) {
+        var el = document.getElementById('t-' + name);
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'item';
+            el.id = 't-' + name;
+            el.innerHTML = '<span class="name"></span><span class="status"></span><div class="detail"></div>';
+            results.appendChild(el);
+        }
+        var labels = { ok: '通过', warn: '注意', err: '失败', run: '进行中' };
+        el.querySelector('.name').textContent = name;
+        var badge = el.querySelector('.status');
+        badge.className = 'status s-' + state;
+        badge.textContent = labels[state];
+        el.querySelector('.detail').textContent = detail || '';
+    };
+
+    var cfg = function () {
+        var base = ($('base').value || '').trim().replace(/\/+$/, '');
+        var key = ($('key').value || '').trim();
+        var model = ($('model').value || '').trim();
+        if (!base || !key) { alert('请先填写 API Base URL 和 API Key'); return null; }
+        return { base: base, key: key, model: model };
+    };
+    var headers = function (c) {
+        return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.key };
+    };
+    var brief = function (s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n) + '…' : s; };
+
+    var testModels = function (c) {
+        return fetch(c.base + '/models', { headers: headers(c) }).then(function (r) {
+            return r.text().then(function (t) {
+                if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + brief(t, 200));
+                var ids = [];
+                try { ids = (JSON.parse(t).data || []).map(function (m) { return m.id; }); } catch (_) { }
+                return { model: ids[0] || '', detail: 'HTTP ' + r.status + ' · 可用模型 ' + ids.length + ' 个\n前 5 个: ' + ids.slice(0, 5).join(', ') };
+            });
+        });
+    };
+
+    var testNonStream = function (c, model) {
+        var started = Date.now();
+        return fetch(c.base + '/chat/completions', {
+            method: 'POST', headers: headers(c),
+            body: JSON.stringify({ model: model, messages: [{ role: 'user', content: '说"ok"两个字' }], max_tokens: 16, stream: false })
+        }).then(function (r) {
+            return r.text().then(function (t) {
+                if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + brief(t, 200));
+                var content = '';
+                try { content = JSON.parse(t).choices[0].message.content; } catch (_) { }
+                return 'HTTP ' + r.status + ' · 耗时 ' + (Date.now() - started) + 'ms · 回复: ' + brief(content, 80);
+            });
+        });
+    };
+
+    var testStream = function (c, model) {
+        var started = Date.now();
+        return fetch(c.base + '/chat/completions', {
+            method: 'POST', headers: headers(c),
+            body: JSON.stringify({ model: model, messages: [{ role: 'user', content: '从 1 数到 5' }], max_tokens: 64, stream: true })
+        }).then(function (r) {
+            if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ' ' + brief(t, 200)); });
+            var ct = r.headers.get('content-type') || '';
+            if (!r.body || typeof r.body.getReader !== 'function') {
+                return r.text().then(function (t) {
+                    return { state: 'err', detail: 'content-type: ' + ct + '\nresponse.body 不可读 → 流式路径被破坏\n' + brief(t, 120) };
+                });
+            }
+            var reader = r.body.getReader();
+            var decoder = new TextDecoder();
+            var chunks = 0, firstMs = 0, text = '';
+            var loop = function () {
+                return reader.read().then(function (chunk) {
+                    if (chunk.done) {
+                        var ms = Date.now() - started;
+                        // firstMs 已经是相对 started 的耗时，不能再减一次绝对时间戳
+                        var chunkMs = firstMs || 0;
+                        var streaming = chunks > 1 || chunkMs < ms * 0.8;
+                        return {
+                            state: streaming ? 'ok' : 'warn',
+                            detail: 'content-type: ' + ct + '\n分片数 ' + chunks + ' · 首片 ' + chunkMs + 'ms · 总计 ' + ms + 'ms\n'
+                                + (streaming ? '逐字流式正常。' : '仅 1 个分片且几乎同时返回 → 疑似被原生 HTTP 缓冲，逐字效果已丢失。')
+                                + '\n' + brief(text, 160)
+                        };
+                    }
+                    chunks++;
+                    if (!firstMs) firstMs = Date.now() - started;
+                    text += decoder.decode(chunk.value, { stream: true });
+                    return loop();
+                });
+            };
+            return loop();
+        });
+    };
+
+    var testNativeHttp = function (c) {
+        var P = (window.Capacitor && window.Capacitor.Plugins) || {};
+        if (!P.CapacitorHttp) return Promise.resolve({ state: 'warn', detail: 'CapacitorHttp 插件未加载。' });
+        if (!N.fetchPatched) {
+            return Promise.resolve({ state: 'ok', detail: 'CapacitorHttp 未开启（enabled: false），WebView fetch 保持流式。\n如上面流式测试失败（CORS），才需要在 capacitor.config.json 里开启，并接受逐字输出退化。' });
+        }
+        return P.CapacitorHttp.request({
+            method: 'GET', url: c.base + '/models', headers: headers(c), responseType: 'text'
+        }).then(function (res) {
+            return {
+                state: 'warn',
+                detail: '原生请求可用 · HTTP ' + res.status + '\n返回结构: data/status/headers/url（无 body 流）\n开启 CapacitorHttp 会绕开 CORS，但 SSE 逐字输出会退化为「等全部生成完一次性显示」。'
+            };
+        });
+    };
+
+    $('run').addEventListener('click', function () {
+        var c = cfg();
+        if (!c) return;
+        results.innerHTML = '';
+        $('run').disabled = true;
+        var model = c.model;
+
+        var chain = Promise.resolve();
+        chain = chain.then(function () {
+            render('环境', 'ok', (N.native ? '原生容器' : '浏览器') + ' · origin ' + (N.origin || location.origin));
+            render('① 模型列表 /models', 'run', '请求中…');
+            return testModels(c).then(function (r) {
+                if (!model) model = r.model;
+                if (!model) throw new Error('未解析到模型 ID，请手动填写');
+                render('① 模型列表 /models', 'ok', r.detail + '\n后续测试使用模型: ' + model);
+            }).catch(function (e) { render('① 模型列表 /models', 'err', e.message); });
+        });
+        chain = chain.then(function () {
+            render('② 非流式对话', 'run', '请求中…');
+            return testNonStream(c, model).then(function (d) { render('② 非流式对话', 'ok', d); })
+                .catch(function (e) { render('② 非流式对话', 'err', e.message); });
+        });
+        chain = chain.then(function () {
+            render('③ 流式对话 SSE', 'run', '请求中…');
+            return testStream(c, model).then(function (r) { render('③ 流式对话 SSE', r.state, r.detail); })
+                .catch(function (e) { render('③ 流式对话 SSE', 'err', e.message + '\n若提示 CORS/网络错误，考虑开启 CapacitorHttp（见下）。'); });
+        });
+        chain = chain.then(function () {
+            render('④ 原生 HTTP 状态', 'run', '检查中…');
+            return testNativeHttp(c).then(function (r) { render('④ 原生 HTTP 状态', r.state, r.detail); })
+                .catch(function (e) { render('④ 原生 HTTP 状态', 'err', e.message); });
+        });
+        chain.then(function () { $('run').disabled = false; });
+    });
+})();
+</script>
+</body>
+</html>
