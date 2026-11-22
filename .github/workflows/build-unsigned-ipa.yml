@@ -36,11 +36,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Workflow revision: zip-build-v3"
+          echo "Workflow revision: zip-build-v4-background-fix"
           echo "Commit: $GITHUB_SHA"
-          ZIPFILE="$GITHUB_WORKSPACE/RP-Hub-iOS-1.0.2.zip"
+          ZIPFILE="$GITHUB_WORKSPACE/RP-Hub-iOS-1.0.2-background-fix.zip"
           if [ ! -f "$ZIPFILE" ]; then
-            echo "::error::Upload RP-Hub-iOS-1.0.2.zip to the repository root."
+            echo "::error::Upload RP-Hub-iOS-1.0.2-background-fix.zip to the repository root."
             ls -la "$GITHUB_WORKSPACE"
             exit 1
           fi
