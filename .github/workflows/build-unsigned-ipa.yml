@@ -1,0 +1,281 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "Artifact retention days, 1-90"
+        required: false
+        default: "30"
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - "LICENSE"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Unzip then archive unsigned IPA
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unzip and locate project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Checkout root ==="
+          find "$GITHUB_WORKSPACE" -maxdepth 2 -mindepth 1 -print | sort | sed -n '1,200p'
+
+          TARGET_DIR="$GITHUB_WORKSPACE/.ci-unpacked"
+          rm -rf "$TARGET_DIR"
+          mkdir -p "$TARGET_DIR"
+
+          ZIPFILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -print -quit)"
+          if [ -n "$ZIPFILE" ]; then
+            echo "Using ZIP: $ZIPFILE"
+            unzip -oq "$ZIPFILE" -d "$TARGET_DIR"
+            echo "BUILT_FROM_ZIP=1" >> "$GITHUB_ENV"
+          else
+            echo "No ZIP found; searching checked-out source."
+            echo "BUILT_FROM_ZIP=0" >> "$GITHUB_ENV"
+          fi
+
+          echo "=== Candidate project files ==="
+          find "$TARGET_DIR" "$GITHUB_WORKSPACE" \
+            -path '*/node_modules' -prune -o \
+            -type f -name 'capacitor.config.json' -print 2>/dev/null | sort -u
+
+          CFG="$(find "$TARGET_DIR" \
+            -path '*/node_modules' -prune -o \
+            -type f -name 'capacitor.config.json' -print -quit 2>/dev/null || true)"
+
+          if [ -z "$CFG" ]; then
+            CFG="$(find "$GITHUB_WORKSPACE" -path "$TARGET_DIR" -prune -o \
+              -path '*/node_modules' -prune -o \
+              -type f -name 'capacitor.config.json' -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "$CFG" ]; then
+            echo "::error::capacitor.config.json was not found. The ZIP may not contain the project source."
+            echo "=== Workspace files ==="
+            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f -print | sort | sed -n '1,500p'
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$CFG")"
+          if [ "$PROJECT_DIR" = "$GITHUB_WORKSPACE" ]; then
+            PROJECT_DIR=.
+          else
+            PROJECT_DIR="${PROJECT_DIR#"$GITHUB_WORKSPACE"/}"
+          fi
+          echo "Project directory: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          if [ -d "$GITHUB_WORKSPACE/$PROJECT_DIR/ios" ]; then
+            IOS_DIR=ios
+          elif [ -d "$GITHUB_WORKSPACE/$PROJECT_DIR/iOS" ]; then
+            IOS_DIR=iOS
+          else
+            echo "::error::Neither ios nor iOS directory exists under $PROJECT_DIR"
+            exit 1
+          fi
+          echo "IOS_DIR=$IOS_DIR" >> "$GITHUB_ENV"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Validate project files
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild -version
+          node --version
+          npm --version
+
+          test -f package.json || {
+            echo "::error::package.json is missing in $PWD"
+            exit 1
+          }
+          test -f package-lock.json || {
+            echo "::error::package-lock.json is missing in $PWD"
+            echo "=== Project files ==="
+            find . -maxdepth 3 -type f -print | sort
+            exit 1
+          }
+          test -f "$IOS_DIR/App/App.xcodeproj/xcshareddata/xcschemes/App.xcscheme" || {
+            echo "::error::Shared Xcode scheme is missing"
+            exit 1
+          }
+
+          APP_ID="$(node -p "require('./capacitor.config.json').appId")"
+          PBX_IDS="$(grep -oE 'PRODUCT_BUNDLE_IDENTIFIER = [^;]+' \
+            "$IOS_DIR/App/App.xcodeproj/project.pbxproj" \
+            | sed -E 's/.*= //' | tr -d '"' | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+          echo "Capacitor appId: $APP_ID"
+          echo "Xcode bundle IDs: $PBX_IDS"
+          [ "$PBX_IDS" = "$APP_ID" ] || {
+            echo "::error::Bundle ID mismatch between capacitor.config.json and project.pbxproj"
+            exit 1
+          }
+
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
+          echo "APP_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
+
+          RETENTION="${{ inputs.retention_days || 30 }}"
+          case "$RETENTION" in
+            ''|*[!0-9]*) RETENTION=30 ;;
+          esac
+          if [ "$RETENTION" -lt 1 ] || [ "$RETENTION" -gt 90 ]; then
+            RETENTION=30
+          fi
+          echo "RETENTION=$RETENTION" >> "$GITHUB_ENV"
+
+      - name: Normalize npm lockfile registry
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npm config set registry https://registry.npmjs.org
+
+          # The supplied lockfile was generated with a Tencent mirror. Replace
+          # only resolved package URLs; integrity hashes remain unchanged.
+          node <<'NODE'
+          const fs = require('fs');
+          const file = 'package-lock.json';
+          const lock = JSON.parse(fs.readFileSync(file, 'utf8'));
+          let changed = 0;
+          for (const pkg of Object.values(lock.packages || {})) {
+            if (pkg && typeof pkg.resolved === 'string') {
+              const next = pkg.resolved
+                .replace(/^https?:\/\/mirrors\.tencent\.com\/npm\//, 'https://registry.npmjs.org/')
+                .replace(/^http:\/\/registry\.npmjs\.org\//, 'https://registry.npmjs.org/');
+              if (next !== pkg.resolved) {
+                pkg.resolved = next;
+                changed++;
+              }
+            }
+          }
+          fs.writeFileSync(file, JSON.stringify(lock, null, 2) + '\n');
+          console.log(`Normalized ${changed} lockfile URLs`);
+          NODE
+
+          if grep -q 'mirrors.tencent.com' package-lock.json; then
+            echo "::error::The lockfile still contains mirrors.tencent.com URLs"
+            exit 1
+          fi
+
+          npm ci --no-audit --no-fund --registry=https://registry.npmjs.org
+
+      - name: Run tests
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm test
+
+      - name: Build web assets
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run build
+
+      - name: Sync Capacitor iOS
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "$IOS_DIR/App/Podfile" ]; then
+            (cd "$IOS_DIR/App" && pod install --repo-update)
+          fi
+          npx cap sync ios
+          test -f "$IOS_DIR/App/App/public/index.html"
+
+      - name: Resolve Swift packages
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "$IOS_DIR/App/App.xcodeproj" \
+            -scheme App \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"
+
+      - name: Archive unsigned app
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project "$IOS_DIR/App/App.xcodeproj" \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/RP-Hub.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            archive
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find "$RUNNER_TEMP/RP-Hub.xcarchive/Products/Applications" \
+            -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [ -n "$APP" ] || {
+            echo "::error::No .app was found in the archive"
+            exit 1
+          }
+
+          STAGE="$RUNNER_TEMP/ipa-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Payload"
+          cp -R "$APP" "$STAGE/Payload/"
+
+          IPA_NAME="RP-Hub-${APP_VERSION}-unsigned-${{ github.run_number }}.ipa"
+          IPA="$GITHUB_WORKSPACE/$IPA_NAME"
+          (cd "$STAGE" && zip -qry "$IPA" Payload -x '*.DS_Store')
+
+          echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
+          echo "IPA_SIZE=$(du -h "$IPA" | awk '{print $1}')" >> "$GITHUB_ENV"
+          echo "IPA_SHA256=$(shasum -a 256 "$IPA" | awk '{print $1}')" >> "$GITHUB_ENV"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: RP-Hub-unsigned-IPA-${{ github.run_number }}
+          path: ${{ env.IPA_NAME }}
+          if-no-files-found: error
+          retention-days: ${{ env.RETENTION }}
+
+      - name: Build summary
+        shell: bash
+        run: |
+          {
+            echo "### Unsigned IPA generated"
+            echo ""
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Project | \`${PROJECT_DIR}\` |"
+            if [ "${BUILT_FROM_ZIP:-0}" = "1" ]; then SOURCE="uploaded ZIP"; else SOURCE="repository source"; fi
+            echo "| Source | $SOURCE |"
+            echo "| Version | \`${APP_VERSION}\` |"
+            echo "| Bundle ID | \`${APP_ID}\` |"
+            echo "| Size | ${IPA_SIZE} |"
+            echo "| SHA256 | \`${IPA_SHA256}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
