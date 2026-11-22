@@ -36,63 +36,47 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "=== Checkout root ==="
-          find "$GITHUB_WORKSPACE" -maxdepth 2 -mindepth 1 -print | sort | sed -n '1,200p'
-
-          TARGET_DIR="$GITHUB_WORKSPACE/.ci-unpacked"
+          echo "Workflow revision: zip-build-v3"
+          echo "Commit: $GITHUB_SHA"
+          ZIPFILE="$GITHUB_WORKSPACE/RP-Hub-iOS-1.0.2.zip"
+          if [ ! -f "$ZIPFILE" ]; then
+            echo "::error::Upload RP-Hub-iOS-1.0.2.zip to the repository root."
+            ls -la "$GITHUB_WORKSPACE"
+            exit 1
+          fi
+          TARGET_DIR="$RUNNER_TEMP/rphub-source"
           rm -rf "$TARGET_DIR"
           mkdir -p "$TARGET_DIR"
+          export ZIPFILE TARGET_DIR
+          python3 <<'PYTHON'
+          import os, zipfile
+          from pathlib import Path
+          target = Path(os.environ['TARGET_DIR']).resolve()
+          with zipfile.ZipFile(os.environ['ZIPFILE']) as archive:
+              for entry in archive.infolist():
+                  dest = (target / entry.filename).resolve()
+                  if not dest.is_relative_to(target):
+                      raise SystemExit(f'Invalid ZIP path: {entry.filename}')
+              archive.extractall(target)
+          PYTHON
 
-          ZIPFILE="$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -print -quit)"
-          if [ -n "$ZIPFILE" ]; then
-            echo "Using ZIP: $ZIPFILE"
-            unzip -oq "$ZIPFILE" -d "$TARGET_DIR"
-            echo "BUILT_FROM_ZIP=1" >> "$GITHUB_ENV"
-          else
-            echo "No ZIP found; searching checked-out source."
-            echo "BUILT_FROM_ZIP=0" >> "$GITHUB_ENV"
-          fi
-
-          echo "=== Candidate project files ==="
-          find "$TARGET_DIR" "$GITHUB_WORKSPACE" \
-            -path '*/node_modules' -prune -o \
-            -type f -name 'capacitor.config.json' -print 2>/dev/null | sort -u
-
-          CFG="$(find "$TARGET_DIR" \
-            -path '*/node_modules' -prune -o \
-            -type f -name 'capacitor.config.json' -print -quit 2>/dev/null || true)"
-
-          if [ -z "$CFG" ]; then
-            CFG="$(find "$GITHUB_WORKSPACE" -path "$TARGET_DIR" -prune -o \
-              -path '*/node_modules' -prune -o \
-              -type f -name 'capacitor.config.json' -print -quit 2>/dev/null || true)"
-          fi
-
-          if [ -z "$CFG" ]; then
-            echo "::error::capacitor.config.json was not found. The ZIP may not contain the project source."
-            echo "=== Workspace files ==="
-            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f -print | sort | sed -n '1,500p'
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "$CFG")"
-          if [ "$PROJECT_DIR" = "$GITHUB_WORKSPACE" ]; then
-            PROJECT_DIR=.
-          else
-            PROJECT_DIR="${PROJECT_DIR#"$GITHUB_WORKSPACE"/}"
-          fi
+          # This workflow targets the supplied ZIP, whose source root is
+          # RP-Hub-iOS/. ios/App/App/capacitor.config.json is a generated copy.
+          PROJECT_DIR="$TARGET_DIR/RP-Hub-iOS"
+          IOS_DIR=ios
+          for file in package.json package-lock.json capacitor.config.json \
+            ios/App/App.xcodeproj/project.pbxproj \
+            ios/App/CapApp-SPM/Package.swift; do
+            if [ ! -f "$PROJECT_DIR/$file" ]; then
+              echo "::error::Missing expected source file: $PROJECT_DIR/$file"
+              find "$TARGET_DIR" -maxdepth 4 -type f -print | sort
+              exit 1
+            fi
+          done
           echo "Project directory: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          if [ -d "$GITHUB_WORKSPACE/$PROJECT_DIR/ios" ]; then
-            IOS_DIR=ios
-          elif [ -d "$GITHUB_WORKSPACE/$PROJECT_DIR/iOS" ]; then
-            IOS_DIR=iOS
-          else
-            echo "::error::Neither ios nor iOS directory exists under $PROJECT_DIR"
-            exit 1
-          fi
           echo "IOS_DIR=$IOS_DIR" >> "$GITHUB_ENV"
+          echo "BUILT_FROM_ZIP=1" >> "$GITHUB_ENV"
 
       - name: Setup Node 22
         uses: actions/setup-node@v4
@@ -198,10 +182,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f "$IOS_DIR/App/Podfile" ]; then
-            (cd "$IOS_DIR/App" && pod install --repo-update)
-          fi
-          npx cap sync ios
+          npx --no-install cap sync ios
           test -f "$IOS_DIR/App/App/public/index.html"
 
       - name: Resolve Swift packages
