@@ -36,11 +36,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Workflow revision: zip-build-v5-keyboard-dismiss"
+          echo "Workflow revision: zip-build-v6-1.0.3"
           echo "Commit: $GITHUB_SHA"
-          ZIPFILE="$GITHUB_WORKSPACE/RP-Hub-iOS-1.0.2-keyboard-dismiss.zip"
+          ZIPFILE="$GITHUB_WORKSPACE/RP-Hub-iOS-1.0.3.zip"
           if [ ! -f "$ZIPFILE" ]; then
-            echo "::error::Upload RP-Hub-iOS-1.0.2-keyboard-dismiss.zip to the repository root."
+            echo "::error::Upload RP-Hub-iOS-1.0.3.zip to the repository root."
             ls -la "$GITHUB_WORKSPACE"
             exit 1
           fi
