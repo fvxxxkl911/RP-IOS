@@ -38,25 +38,27 @@ jobs:
 
           echo "Workflow revision: zip-build-v7-kb-lab"
           echo "Commit: $GITHUB_SHA"
-          ZIPFILE="$GITHUB_WORKSPACE/RP-Hub-iOS-1.0.4-keyboard-lab.zip"
-          if [ ! -f "$ZIPFILE" ]; then
-            echo "::error::Upload RP-Hub-iOS-1.0.4-keyboard-lab.zip to the repository root."
+          # 自动找最新的 RP-Hub-iOS-*.zip（按修改时间），不再写死文件名
+          ZIPFILE="$(ls -t "$GITHUB_WORKSPACE"/RP-Hub-iOS-*.zip 2>/dev/null | head -n1)"
+          if [ -z "$ZIPFILE" ]; then
+            echo "::error::No RP-Hub-iOS-*.zip found in repository root."
             ls -la "$GITHUB_WORKSPACE"
             exit 1
           fi
+          echo "Using: $(basename "$ZIPFILE")"
           TARGET_DIR="$RUNNER_TEMP/rphub-source"
           rm -rf "$TARGET_DIR"
           mkdir -p "$TARGET_DIR"
           export ZIPFILE TARGET_DIR
-          python3 <<'PYTHON'
+          python3 <<"PYTHON"
           import os, zipfile
           from pathlib import Path
-          target = Path(os.environ['TARGET_DIR']).resolve()
-          with zipfile.ZipFile(os.environ['ZIPFILE']) as archive:
+          target = Path(os.environ["TARGET_DIR"]).resolve()
+          with zipfile.ZipFile(os.environ["ZIPFILE"]) as archive:
               for entry in archive.infolist():
                   dest = (target / entry.filename).resolve()
                   if not dest.is_relative_to(target):
-                      raise SystemExit(f'Invalid ZIP path: {entry.filename}')
+                      raise SystemExit(f"Invalid ZIP path: {entry.filename}")
               archive.extractall(target)
           PYTHON
 
@@ -77,7 +79,6 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "IOS_DIR=$IOS_DIR" >> "$GITHUB_ENV"
           echo "BUILT_FROM_ZIP=1" >> "$GITHUB_ENV"
-
       - name: Setup Node 22
         uses: actions/setup-node@v4
         with:
